@@ -9,7 +9,7 @@
     Implements priority-based reactive behaviors: Halt, Keyboard, Escape,
     Avoid, Turn, and Drive.
   </description>
-  <maintainer email="student@ou.edu">Riley</maintainer>
+  <maintainer email="riley.gillon@ou.edu">Riley</maintainer>
   <license>MIT</license>
 
   <!-- Runtime dependencies -->
