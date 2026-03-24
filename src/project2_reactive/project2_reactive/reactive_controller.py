@@ -21,6 +21,7 @@
 #   6. Drive    – default: drive straight forward
 
 import math
+import random
 import threading
 import time
 from typing import List, Optional
@@ -87,6 +88,11 @@ class ReactiveController(Node):
 
         # Latest LiDAR scan.
         self._scan: Optional[LaserScan] = None
+        # Cached front-sector distances from the latest scan.
+        self._front_left: List[float] = []
+        self._front_right: List[float] = []
+        # Pre-collision flag from front laser proximity.
+        self._laser_collision: bool = False
 
         # True while a bumper collision event is active.
         self._collision_detected: bool = False
@@ -110,6 +116,11 @@ class ReactiveController(Node):
         self._turn_start_wall: float = 0.0  # wall time at turn start
         self._turn_duration: float = 0.0   # seconds the turn should last
 
+        # Escape fixed-action pattern state.
+        self._escaping: bool = False
+        self._escape_turn_sign: float = 1.0
+        self._escape_cooldown_until: float = 0.0
+
         # ---- Control-loop timer at 10 Hz ---------------------------------
         self._timer = self.create_timer(0.1, self._control_loop)
 
@@ -120,9 +131,31 @@ class ReactiveController(Node):
     # ------------------------------------------------------------------
 
     def _scan_callback(self, msg: LaserScan) -> None:
-        """Store the latest LiDAR scan."""
+        """Store scan, cache front-sector ranges, and compute laser halt flag."""
         with self._lock:
             self._scan = msg
+            left, right = behaviors.get_front_distances(
+                list(msg.ranges),
+                msg.angle_min,
+                msg.angle_increment,
+                msg.range_min,
+                msg.range_max,
+            )
+            self._front_left = left
+            self._front_right = right
+
+            self._laser_collision = any(
+                math.isfinite(r)
+                and msg.range_min <= r <= msg.range_max
+                and r < behaviors.LASER_HALT_DISTANCE_M
+                and abs(
+                    (msg.angle_min + i * msg.angle_increment + math.pi)
+                    % (2.0 * math.pi)
+                    - math.pi
+                )
+                < behaviors.LASER_HALT_SECTOR_RAD
+                for i, r in enumerate(msg.ranges)
+            )
 
     def _hazard_callback(self, msg: HazardDetectionVector) -> None:
         """Set the collision flag when a BUMP hazard is reported."""
@@ -195,8 +228,8 @@ class ReactiveController(Node):
         This is the highest-priority behaviour; it supersedes everything
         else, including keyboard input.
         """
-        if self._collision_detected:
-            self.get_logger().warn('HALT: collision detected')
+        if self._collision_detected or self._laser_collision:
+            self.get_logger().warn('HALT: collision or laser hazard detected')
             return self._make_twist(0.0, 0.0)
         return None
 
@@ -227,26 +260,47 @@ class ReactiveController(Node):
     def _escape_behavior(self) -> Optional[TwistStamped]:
         """Priority 3 – back away from a symmetric frontal obstacle.
 
-        When both the left and right halves of the front sector are blocked
-        at roughly equal range the robot reverses while simultaneously
-        turning, which pivots it away from the obstacle.
+        This is implemented as a fixed-action pattern: once Escape is
+        triggered, it continues running until the front obstacle clears,
+        rather than dropping out immediately when readings fluctuate.
         """
         if self._scan is None:
             return None
 
-        left, right = behaviors.get_front_distances(
-            list(self._scan.ranges),
-            self._scan.angle_min,
-            self._scan.angle_increment,
-            self._scan.range_min,
-            self._scan.range_max,
-        )
+        now = time.monotonic()
 
-        if behaviors.is_symmetric_obstacle(left, right):
+        # Keep escaping once triggered until the path is clear.
+        if self._escaping:
+            if not behaviors.obstacle_in_range(
+                self._front_left,
+                self._front_right,
+            ):
+                self._escaping = False
+                self._escape_cooldown_until = (
+                    now + behaviors.ESCAPE_COOLDOWN_S
+                )
+                self.get_logger().info('ESCAPE: completed, cooldown active')
+                return None
+
+            return self._make_twist(
+                behaviors.ESCAPE_BACKUP_SPEED_MPS,
+                self._escape_turn_sign * behaviors.TURN_SPEED_RADS,
+            )
+
+        # Cooldown prevents immediate escape retrigger oscillation.
+        if now < self._escape_cooldown_until:
+            return None
+
+        if behaviors.is_symmetric_obstacle(
+            self._front_left,
+            self._front_right,
+        ):
+            self._escaping = True
+            self._escape_turn_sign = 1.0 if random.random() > 0.5 else -1.0
             self.get_logger().info('ESCAPE: symmetric obstacle in front')
             return self._make_twist(
                 behaviors.ESCAPE_BACKUP_SPEED_MPS,
-                behaviors.TURN_SPEED_RADS,
+                self._escape_turn_sign * behaviors.TURN_SPEED_RADS,
             )
 
         return None
@@ -260,23 +314,24 @@ class ReactiveController(Node):
         if self._scan is None:
             return None
 
-        left, right = behaviors.get_front_distances(
-            list(self._scan.ranges),
-            self._scan.angle_min,
-            self._scan.angle_increment,
-            self._scan.range_min,
-            self._scan.range_max,
-        )
-
         # No obstacle at all – this behaviour is inactive.
-        if not behaviors.obstacle_in_range(left, right):
+        if not behaviors.obstacle_in_range(
+            self._front_left,
+            self._front_right,
+        ):
             return None
 
         # Symmetric obstacles are handled by _escape_behavior (priority 3).
-        if behaviors.is_symmetric_obstacle(left, right):
+        if behaviors.is_symmetric_obstacle(
+            self._front_left,
+            self._front_right,
+        ):
             return None
 
-        angular_z = behaviors.get_avoid_direction(left, right)
+        angular_z = behaviors.get_avoid_direction(
+            self._front_left,
+            self._front_right,
+        )
         self.get_logger().info(
             f'AVOID: asymmetric obstacle, angular_z={angular_z:.2f}'
         )

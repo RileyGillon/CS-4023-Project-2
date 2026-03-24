@@ -23,9 +23,8 @@
 #   source ~/ros2_ws/install/setup.bash
 #   ros2 launch project2_reactive project2.launch.py
 #
-# A separate xterm window opens for the keyboard tele-op.  Click that
-# window and follow the on-screen instructions.  Use conservative speeds
-# (e.g. speed=0.1, turn=0.2) as recommended in the TurtleBot 4 manual.
+# The tele-op node runs without an xterm prefix to avoid a hard dependency
+# on xterm availability on the CSN lab machines.
 
 from launch import LaunchDescription
 from launch_ros.actions import Node
@@ -55,14 +54,12 @@ def generate_launch_description() -> LaunchDescription:
     #    pipeline (below Halt, above all autonomous behaviours).
     #
     #    stamped:=true  – publish TwistStamped (required by TurtleBot 4).
-    #    prefix='xterm -e'  – open a dedicated terminal window for input.
     # ------------------------------------------------------------------
     teleop_node = Node(
         package='teleop_twist_keyboard',
         executable='teleop_twist_keyboard',
         name='teleop_keyboard',
         output='screen',
-        prefix='xterm -e',
         parameters=[{'stamped': True}],
         remappings=[('/cmd_vel', '/key_vel')],
     )

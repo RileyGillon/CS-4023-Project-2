@@ -28,9 +28,9 @@ from typing import List, Optional, Tuple
 # Physical constants
 # ---------------------------------------------------------------------------
 
-#: 1 foot converted to metres – threshold for obstacle detection and
-#: the forward-travel distance that triggers a random re-orientation.
-OBSTACLE_DISTANCE_M: float = 0.3048
+#: Obstacle detection threshold (2 ft in metres).
+#: A 2 ft lookahead gives the robot enough space to react before contact.
+OBSTACLE_DISTANCE_M: float = 0.6096
 
 #: Distance of forward travel (in metres) after which a random turn fires.
 TURN_DISTANCE_M: float = 0.3048
@@ -70,6 +70,15 @@ TURN_ANGLE_RANGE_RAD: float = math.radians(15.0)
 
 #: Seconds without a keyboard message before the Keyboard behaviour deactivates.
 KEYBOARD_TIMEOUT_S: float = 0.5
+
+#: Escape re-trigger cooldown in seconds after leaving an obstacle.
+ESCAPE_COOLDOWN_S: float = 3.0
+
+#: Laser pre-collision halt distance in metres.
+LASER_HALT_DISTANCE_M: float = 0.18
+
+#: Half-angle of the laser halt sector around the forward axis.
+LASER_HALT_SECTOR_RAD: float = math.radians(45.0)
 
 
 # ---------------------------------------------------------------------------

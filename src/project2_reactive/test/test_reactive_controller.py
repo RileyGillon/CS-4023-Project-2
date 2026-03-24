@@ -13,6 +13,7 @@
 #   python -m pytest test/test_reactive_controller.py -v
 
 import math
+import random
 import sys
 import threading
 import time
@@ -123,7 +124,10 @@ def ctrl() -> ReactiveController:
 
     # Sensor / collision state.
     c._collision_detected = False
+    c._laser_collision = False
     c._scan = None
+    c._front_left = []
+    c._front_right = []
     c._keyboard_cmd = None
     c._last_key_time = None
 
@@ -138,6 +142,11 @@ def ctrl() -> ReactiveController:
     c._turn_sign = 1.0
     c._turn_start_wall = 0.0
     c._turn_duration = 0.0
+
+    # Escape fixed-action pattern state.
+    c._escaping = False
+    c._escape_turn_sign = 1.0
+    c._escape_cooldown_until = 0.0
 
     # Thread safety.
     c._lock = threading.Lock()
@@ -184,6 +193,17 @@ class TestHaltBehavior:
         ctrl._collision_detected = True
         assert ctrl._halt_behavior() is not None
         ctrl._collision_detected = False
+        assert ctrl._halt_behavior() is None
+
+    def test_returns_command_when_laser_collision_detected(self, ctrl) -> None:
+        ctrl._laser_collision = True
+        result = ctrl._halt_behavior()
+        assert result is not None
+
+    def test_laser_collision_clears_to_none(self, ctrl) -> None:
+        ctrl._laser_collision = True
+        assert ctrl._halt_behavior() is not None
+        ctrl._laser_collision = False
         assert ctrl._halt_behavior() is None
 
 
@@ -265,6 +285,8 @@ class TestEscapeBehavior:
     def test_returns_command_on_symmetric_obstacle(self, ctrl) -> None:
         close = behaviors.OBSTACLE_DISTANCE_M * 0.4
         ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
         result = ctrl._escape_behavior()
         assert result is not None
 
@@ -272,6 +294,8 @@ class TestEscapeBehavior:
         """Escape should reverse: linear.x must be negative."""
         close = behaviors.OBSTACLE_DISTANCE_M * 0.4
         ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
         result = ctrl._escape_behavior()
         assert result.twist.linear.x < 0.0
 
@@ -279,13 +303,80 @@ class TestEscapeBehavior:
         """Escape also turns to pivot away."""
         close = behaviors.OBSTACLE_DISTANCE_M * 0.4
         ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
         result = ctrl._escape_behavior()
         assert abs(result.twist.angular.z) > 0.0
 
     def test_returns_none_on_asymmetric_obstacle(self, ctrl) -> None:
         """Asymmetric obstacle should NOT trigger escape."""
         ctrl._scan = _make_mock_scan(left_dist=0.1, right_dist=5.0)
+        ctrl._front_left = [0.1]
+        ctrl._front_right = [5.0]
         assert ctrl._escape_behavior() is None
+
+    def test_escape_persists_after_trigger_until_clear(self, ctrl) -> None:
+        close = behaviors.OBSTACLE_DISTANCE_M * 0.4
+        ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
+
+        first = ctrl._escape_behavior()
+        assert first is not None
+        assert ctrl._escaping is True
+
+        # Even if symmetry goes away, escape stays active while obstacle remains.
+        ctrl._front_left = [0.2]
+        ctrl._front_right = [0.5]
+        second = ctrl._escape_behavior()
+        assert second is not None
+        assert ctrl._escaping is True
+
+    def test_escape_sets_cooldown_when_clear(self, ctrl) -> None:
+        close = behaviors.OBSTACLE_DISTANCE_M * 0.4
+        ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
+        ctrl._escape_behavior()
+
+        # Path clears, so escape should end and cooldown should be set.
+        ctrl._front_left = [5.0]
+        ctrl._front_right = [5.0]
+        before = time.monotonic()
+        result = ctrl._escape_behavior()
+        assert result is None
+        assert ctrl._escaping is False
+        assert ctrl._escape_cooldown_until > before
+
+    def test_escape_randomizes_direction_sign(self, ctrl, monkeypatch) -> None:
+        close = behaviors.OBSTACLE_DISTANCE_M * 0.4
+        ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
+
+        monkeypatch.setattr(random, 'random', lambda: 0.9)
+        ctrl._escape_behavior()
+        sign_one = ctrl._escape_turn_sign
+
+        ctrl._escaping = False
+        ctrl._escape_cooldown_until = 0.0
+        monkeypatch.setattr(random, 'random', lambda: 0.1)
+        ctrl._escape_behavior()
+        sign_two = ctrl._escape_turn_sign
+
+        assert sign_one == 1.0
+        assert sign_two == -1.0
+
+    def test_escape_does_not_retrigger_during_cooldown(self, ctrl) -> None:
+        close = behaviors.OBSTACLE_DISTANCE_M * 0.4
+        ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
+        ctrl._escape_cooldown_until = time.monotonic() + 2.0
+
+        result = ctrl._escape_behavior()
+        assert result is None
+        assert ctrl._escaping is False
 
 
 # ---------------------------------------------------------------------------
@@ -301,37 +392,51 @@ class TestAvoidBehavior:
 
     def test_returns_none_when_path_clear(self, ctrl) -> None:
         ctrl._scan = _make_mock_scan(background=5.0)
+        ctrl._front_left = [5.0]
+        ctrl._front_right = [5.0]
         assert ctrl._avoid_behavior() is None
 
     def test_returns_command_on_left_obstacle(self, ctrl) -> None:
         ctrl._scan = _make_mock_scan(left_dist=0.1, right_dist=5.0)
+        ctrl._front_left = [0.1]
+        ctrl._front_right = [5.0]
         assert ctrl._avoid_behavior() is not None
 
     def test_returns_command_on_right_obstacle(self, ctrl) -> None:
         ctrl._scan = _make_mock_scan(left_dist=5.0, right_dist=0.1)
+        ctrl._front_left = [5.0]
+        ctrl._front_right = [0.1]
         assert ctrl._avoid_behavior() is not None
 
     def test_returns_none_on_symmetric_obstacle(self, ctrl) -> None:
         """Symmetric obstacle is handled by escape, not avoid."""
         close = behaviors.OBSTACLE_DISTANCE_M * 0.4
         ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
         assert ctrl._avoid_behavior() is None
 
     def test_left_obstacle_gives_right_turn(self, ctrl) -> None:
         """Left obstacle → negative angular-z (right / CW turn)."""
         ctrl._scan = _make_mock_scan(left_dist=0.1, right_dist=5.0)
+        ctrl._front_left = [0.1]
+        ctrl._front_right = [5.0]
         result = ctrl._avoid_behavior()
         assert result.twist.angular.z < 0.0
 
     def test_right_obstacle_gives_left_turn(self, ctrl) -> None:
         """Right obstacle → positive angular-z (left / CCW turn)."""
         ctrl._scan = _make_mock_scan(left_dist=5.0, right_dist=0.1)
+        ctrl._front_left = [5.0]
+        ctrl._front_right = [0.1]
         result = ctrl._avoid_behavior()
         assert result.twist.angular.z > 0.0
 
     def test_avoid_command_zero_linear_x(self, ctrl) -> None:
         """Avoid turns in place – linear.x should be zero."""
         ctrl._scan = _make_mock_scan(left_dist=0.1, right_dist=5.0)
+        ctrl._front_left = [0.1]
+        ctrl._front_right = [5.0]
         result = ctrl._avoid_behavior()
         assert result.twist.linear.x == pytest.approx(0.0)
 
@@ -461,6 +566,8 @@ class TestControlLoopPriority:
         # Make Escape also active.
         close = behaviors.OBSTACLE_DISTANCE_M * 0.4
         ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
         # Make Keyboard also active.
         mock_cmd = MagicMock()
         mock_cmd.twist.linear.x = 0.5
@@ -480,6 +587,8 @@ class TestControlLoopPriority:
         """No collision, no keyboard, no obstacles → Drive fires."""
         ctrl._collision_detected = False
         ctrl._scan = _make_mock_scan(background=5.0)
+        ctrl._front_left = [5.0]
+        ctrl._front_right = [5.0]
 
         ctrl._control_loop()
 
@@ -491,6 +600,8 @@ class TestControlLoopPriority:
         """Active keyboard → keyboard command published, not autonomous."""
         ctrl._collision_detected = False
         ctrl._scan = _make_mock_scan(background=5.0)
+        ctrl._front_left = [5.0]
+        ctrl._front_right = [5.0]
 
         original_msg = MagicMock()
         original_msg.twist.linear.x = 0.3
@@ -509,6 +620,8 @@ class TestControlLoopPriority:
         """The loop must publish exactly one command per control cycle."""
         ctrl._collision_detected = False
         ctrl._scan = _make_mock_scan(background=5.0)
+        ctrl._front_left = [5.0]
+        ctrl._front_right = [5.0]
 
         ctrl._control_loop()
 
@@ -519,6 +632,8 @@ class TestControlLoopPriority:
         ctrl._collision_detected = False
         close = behaviors.OBSTACLE_DISTANCE_M * 0.4
         ctrl._scan = _make_mock_scan(close_both=close)
+        ctrl._front_left = [close]
+        ctrl._front_right = [close]
 
         ctrl._control_loop()
 

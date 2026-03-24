@@ -387,8 +387,8 @@ class TestComputeDistance:
     def test_one_foot_threshold(self) -> None:
         """A displacement of exactly 1 ft (0.3048 m) is returned correctly."""
         assert behaviors.compute_distance(
-            0, 0, behaviors.OBSTACLE_DISTANCE_M, 0
-        ) == pytest.approx(behaviors.OBSTACLE_DISTANCE_M)
+            0, 0, behaviors.TURN_DISTANCE_M, 0
+        ) == pytest.approx(behaviors.TURN_DISTANCE_M)
 
 
 # ---------------------------------------------------------------------------
