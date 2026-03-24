@@ -1,0 +1,16 @@
+<launch>
+  <node
+    pkg="project2_reactive"
+    exec="reactive_controller"
+    name="reactive_controller"
+    output="screen" />
+
+  <node
+    pkg="teleop_twist_keyboard"
+    exec="teleop_twist_keyboard"
+    name="teleop_keyboard"
+    output="screen">
+    <param name="stamped" value="true" />
+    <remap from="/cmd_vel" to="/key_vel" />
+  </node>
+</launch>

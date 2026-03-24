@@ -12,21 +12,25 @@
   <maintainer email="riley.gillon@ou.edu">Riley</maintainer>
   <license>MIT</license>
 
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
   <!-- Runtime dependencies -->
-  <exec_depend>rclpy</exec_depend>
-  <exec_depend>geometry_msgs</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>irobot_create_msgs</exec_depend>
-  <exec_depend>teleop_twist_keyboard</exec_depend>
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>irobot_create_msgs</depend>
+  <depend>teleop_twist_keyboard</depend>
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
 
   <!-- Test dependencies -->
+  <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
-  <test_depend>python3-pytest</test_depend>
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
 
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>
