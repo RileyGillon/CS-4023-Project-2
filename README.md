@@ -66,4 +66,10 @@ ros2 daemon start
 
 Afterward, run `ros2 topic list` on the desktop terminal to confirm the robot's topics are visible.
 
+When You're Done
+
+In the SSH terminal, stop the LiDAR:
+
+bashros2 service call /stop_motor std_srvs/srv/Empty "{}"
+
 > **Note:** These environment variables must be set in **every new desktop terminal** you open. Repeat this step for each additional desktop terminal you need.
