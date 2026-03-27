@@ -25,6 +25,14 @@ namespace
 
 constexpr double kPi = 3.14159265358979323846;
 
+// Normalize an angle to [-pi, pi]
+double normalize_angle(double a)
+{
+  while (a >  kPi) { a -= 2.0 * kPi; }
+  while (a < -kPi) { a += 2.0 * kPi; }
+  return a;
+}
+
 }  // namespace
 
 class ReactiveController : public rclcpp::Node
@@ -91,11 +99,7 @@ private:
         continue;
       }
       const double raw = msg->angle_min + static_cast<double>(i) * msg->angle_increment;
-      double angle = std::fmod(raw + kPi, 2.0 * kPi);
-      if (angle < 0.0) {
-        angle += 2.0 * kPi;
-      }
-      angle -= kPi;
+      const double angle = normalize_angle(raw);
       if (std::abs(angle) < behaviors::LASER_HALT_SECTOR_RAD &&
         r < behaviors::LASER_HALT_DISTANCE_M)
       {
@@ -147,9 +151,14 @@ private:
     has_last_odom_ = true;
   }
 
-  // Priority 1 — Halt if collision detected by bumper or laser proximity
+  // Priority 1 — Halt if collision detected by bumper or laser proximity.
+  // Bypassed while escaping so the robot can complete its 180° turn in place,
+  // and during the post-escape push so it can drive away from the wall.
   std::optional<geometry_msgs::msg::TwistStamped> halt_behavior()
   {
+    if (escaping_ || post_escape_ticks_ > 0) {
+      return std::nullopt;
+    }
     if (collision_detected_ || laser_collision_) {
       return make_twist(0.0, 0.0);
     }
@@ -182,10 +191,14 @@ private:
 
   // Priority 3 — Escape from symmetric obstacles within 1ft in front of the robot.
   //
-  // This is a FIXED ACTION PATTERN (not a reflex): once triggered, the robot
-  // continues turning for a pre-sampled duration corresponding to 180° ± 30°,
-  // regardless of whether the obstacle is still detected mid-turn. The robot
-  // only exits escaping when the full timed rotation is complete.
+  // Fixed action pattern: on trigger, a target yaw 180° ± 30° away is sampled
+  // and the robot turns until it ACTUALLY reaches that heading via odometry
+  // feedback, regardless of whether the obstacle is still detected mid-turn.
+  // This is more reliable than a timer on a physical robot where wheel slip or
+  // wall contact can cause the turn to fall short.
+  //
+  // Once the heading is reached, a short forward push drives the robot
+  // physically away from the wall before normal behaviors resume.
   std::optional<geometry_msgs::msg::TwistStamped> escape_behavior()
   {
     if (!scan_) {
@@ -194,53 +207,66 @@ private:
 
     const auto now_steady = std::chrono::steady_clock::now();
 
-    if (escaping_) {
-      const auto elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(
-        now_steady - escape_start_time_).count();
-      if (elapsed < escape_duration_s_) {
-        // Still within the fixed-action-pattern window — keep turning
-        return make_twist(
-          behaviors::ESCAPE_BACKUP_SPEED_MPS,
-          escape_turn_sign_ * behaviors::ESCAPE_TURN_SPEED_RADS);
+    // Post-escape forward push (~2 seconds at 100ms ticks)
+    if (post_escape_ticks_ > 0) {
+      post_escape_ticks_--;
+      if (post_escape_ticks_ == 0) {
+        // Start cooldown once the forward push finishes
+        escape_cooldown_until_ = now_steady +
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(behaviors::ESCAPE_COOLDOWN_S));
       }
-      // Fixed action pattern complete — enter cooldown before escape can re-trigger
-      escaping_ = false;
-      escape_cooldown_until_ = now_steady +
-        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-        std::chrono::duration<double>(behaviors::ESCAPE_COOLDOWN_S));
-      return std::nullopt;
+      return make_twist(behaviors::FORWARD_SPEED_MPS, 0.0);
     }
 
-    // Do not re-trigger during cooldown
+    // Cooldown — prevents immediate re-trigger after a completed escape
     if (now_steady < escape_cooldown_until_) {
       return std::nullopt;
     }
 
+    if (escaping_) {
+      // Yaw-tracking: measure remaining angular error to target heading
+      const double err = normalize_angle(escape_target_yaw_ - current_yaw_);
+
+      // Within ±30° of target — escape turn complete
+      if (std::abs(err) <= behaviors::ESCAPE_TOLERANCE_RAD) {
+        escaping_ = false;
+        post_escape_ticks_ = POST_ESCAPE_TICKS;
+        RCLCPP_INFO(get_logger(), "Escape turn complete, pushing forward.");
+        return make_twist(behaviors::FORWARD_SPEED_MPS, 0.0);
+      }
+
+      // Still turning — direction determined by sign of remaining error
+      const double turn_dir = (err > 0.0) ? 1.0 : -1.0;
+      return make_twist(0.0, turn_dir * behaviors::ESCAPE_TURN_SPEED_RADS);
+    }
+
+    // Trigger escape when a symmetric obstacle is detected within 1ft
     if (behaviors::is_symmetric_obstacle(front_left_, front_right_)) {
       escaping_ = true;
-      escape_start_time_ = now_steady;
 
-      // Spec: "turn so that it is roughly facing away from the detected obstacles
-      // (180 ± 30°)". Sample a target angle uniformly in [150°, 210°].
+      // Spec: turn 180° ± 30°. Sample target angle in [150°, 210°].
       std::uniform_real_distribution<double> angle_dist(
         kPi - kPi / 6.0, kPi + kPi / 6.0);
-      escape_duration_s_ = angle_dist(rng_) / behaviors::ESCAPE_TURN_SPEED_RADS;
+      const double delta = angle_dist(rng_);
 
+      // Randomly choose to turn left or right
       std::uniform_real_distribution<double> coin(0.0, 1.0);
-      escape_turn_sign_ = (coin(rng_) > 0.5) ? 1.0 : -1.0;
+      const double sign = (coin(rng_) > 0.5) ? 1.0 : -1.0;
+      escape_target_yaw_ = normalize_angle(current_yaw_ + sign * delta);
 
-      return make_twist(
-        behaviors::ESCAPE_BACKUP_SPEED_MPS,
-        escape_turn_sign_ * behaviors::ESCAPE_TURN_SPEED_RADS);
+      RCLCPP_INFO(
+        get_logger(), "Escape triggered. Target yaw: %.2f", escape_target_yaw_);
+
+      return make_twist(0.0, sign * behaviors::ESCAPE_TURN_SPEED_RADS);
     }
 
     return std::nullopt;
   }
 
   // Priority 4 — Avoid asymmetric obstacles within 1ft in front of the robot.
-  //
-  // This IS a reflex: it fires only while asymmetric obstacles are present and
-  // stops as soon as they clear.
+  // Reflex: fires only while asymmetric obstacles are present and stops as
+  // soon as they clear.
   std::optional<geometry_msgs::msg::TwistStamped> avoid_behavior() const
   {
     if (!scan_) {
@@ -251,7 +277,7 @@ private:
       return std::nullopt;
     }
 
-    // If the obstacle is symmetric, escape_behavior (higher priority) handles it
+    // Symmetric obstacles are handled by escape (higher priority)
     if (behaviors::is_symmetric_obstacle(front_left_, front_right_)) {
       return std::nullopt;
     }
@@ -321,6 +347,9 @@ private:
     cmd_vel_pub_->publish(drive_behavior());
   }
 
+  // 20 ticks * 100ms = 2 seconds of forward push after escape turn
+  static constexpr int POST_ESCAPE_TICKS = 20;
+
   std::mutex mutex_;
 
   rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr cmd_vel_pub_;
@@ -352,10 +381,10 @@ private:
   std::chrono::steady_clock::time_point turn_start_time_{};
   double turn_duration_s_{0.0};
 
+  // Escape state
   bool escaping_{false};
-  double escape_turn_sign_{1.0};
-  std::chrono::steady_clock::time_point escape_start_time_{};   // when current escape began
-  double escape_duration_s_{0.0};                               // pre-sampled turn duration
+  double escape_target_yaw_{0.0};          // absolute yaw the robot must reach
+  int post_escape_ticks_{0};               // counts down the post-escape forward push
   std::chrono::steady_clock::time_point escape_cooldown_until_{};
 
   std::mt19937 rng_;
