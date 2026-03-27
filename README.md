@@ -5,7 +5,7 @@ git push origin feature/your-feature-name
 
 ---
 
-## Connecting a TurtleBot 4 to the Ubuntu 24.04 Lab Computers
+## Connecting a TurtleBot 4
 
 ### Step 1 – Power on and position the robot
 
