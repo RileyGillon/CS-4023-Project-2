@@ -147,6 +147,7 @@ private:
     has_last_odom_ = true;
   }
 
+  // Priority 1 — Halt if collision detected by bumper or laser proximity
   std::optional<geometry_msgs::msg::TwistStamped> halt_behavior()
   {
     if (collision_detected_ || laser_collision_) {
@@ -155,6 +156,7 @@ private:
     return std::nullopt;
   }
 
+  // Priority 2 — Accept keyboard movement commands from a human user
   std::optional<geometry_msgs::msg::TwistStamped> keyboard_behavior()
   {
     if (!keyboard_cmd_ || !has_key_time_) {
@@ -178,6 +180,12 @@ private:
     return std::nullopt;
   }
 
+  // Priority 3 — Escape from symmetric obstacles within 1ft in front of the robot.
+  //
+  // This is a FIXED ACTION PATTERN (not a reflex): once triggered, the robot
+  // continues turning for a pre-sampled duration corresponding to 180° ± 30°,
+  // regardless of whether the obstacle is still detected mid-turn. The robot
+  // only exits escaping when the full timed rotation is complete.
   std::optional<geometry_msgs::msg::TwistStamped> escape_behavior()
   {
     if (!scan_) {
@@ -187,35 +195,52 @@ private:
     const auto now_steady = std::chrono::steady_clock::now();
 
     if (escaping_) {
-      if (!behaviors::obstacle_in_range(front_left_, front_right_)) {
-        escaping_ = false;
-        escape_cooldown_until_ = now_steady +
-          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-          std::chrono::duration<double>(behaviors::ESCAPE_COOLDOWN_S));
-        return std::nullopt;
+      const auto elapsed = std::chrono::duration_cast<std::chrono::duration<double>>(
+        now_steady - escape_start_time_).count();
+      if (elapsed < escape_duration_s_) {
+        // Still within the fixed-action-pattern window — keep turning
+        return make_twist(
+          behaviors::ESCAPE_BACKUP_SPEED_MPS,
+          escape_turn_sign_ * behaviors::ESCAPE_TURN_SPEED_RADS);
       }
-
-      return make_twist(
-        behaviors::ESCAPE_BACKUP_SPEED_MPS,
-        escape_turn_sign_ * behaviors::TURN_SPEED_RADS);
+      // Fixed action pattern complete — enter cooldown before escape can re-trigger
+      escaping_ = false;
+      escape_cooldown_until_ = now_steady +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(behaviors::ESCAPE_COOLDOWN_S));
+      return std::nullopt;
     }
 
+    // Do not re-trigger during cooldown
     if (now_steady < escape_cooldown_until_) {
       return std::nullopt;
     }
 
     if (behaviors::is_symmetric_obstacle(front_left_, front_right_)) {
       escaping_ = true;
+      escape_start_time_ = now_steady;
+
+      // Spec: "turn so that it is roughly facing away from the detected obstacles
+      // (180 ± 30°)". Sample a target angle uniformly in [150°, 210°].
+      std::uniform_real_distribution<double> angle_dist(
+        kPi - kPi / 6.0, kPi + kPi / 6.0);
+      escape_duration_s_ = angle_dist(rng_) / behaviors::ESCAPE_TURN_SPEED_RADS;
+
       std::uniform_real_distribution<double> coin(0.0, 1.0);
       escape_turn_sign_ = (coin(rng_) > 0.5) ? 1.0 : -1.0;
+
       return make_twist(
         behaviors::ESCAPE_BACKUP_SPEED_MPS,
-        escape_turn_sign_ * behaviors::TURN_SPEED_RADS);
+        escape_turn_sign_ * behaviors::ESCAPE_TURN_SPEED_RADS);
     }
 
     return std::nullopt;
   }
 
+  // Priority 4 — Avoid asymmetric obstacles within 1ft in front of the robot.
+  //
+  // This IS a reflex: it fires only while asymmetric obstacles are present and
+  // stops as soon as they clear.
   std::optional<geometry_msgs::msg::TwistStamped> avoid_behavior() const
   {
     if (!scan_) {
@@ -226,6 +251,7 @@ private:
       return std::nullopt;
     }
 
+    // If the obstacle is symmetric, escape_behavior (higher priority) handles it
     if (behaviors::is_symmetric_obstacle(front_left_, front_right_)) {
       return std::nullopt;
     }
@@ -234,6 +260,7 @@ private:
     return make_twist(0.0, angular_z);
   }
 
+  // Priority 5 — Turn randomly (± 15°) after every 1ft of forward movement
   std::optional<geometry_msgs::msg::TwistStamped> turn_behavior()
   {
     const auto now_steady = std::chrono::steady_clock::now();
@@ -260,6 +287,7 @@ private:
     return std::nullopt;
   }
 
+  // Priority 6 (lowest) — Drive forward
   geometry_msgs::msg::TwistStamped drive_behavior() const
   {
     return make_twist(behaviors::FORWARD_SPEED_MPS, 0.0);
@@ -326,6 +354,8 @@ private:
 
   bool escaping_{false};
   double escape_turn_sign_{1.0};
+  std::chrono::steady_clock::time_point escape_start_time_{};   // when current escape began
+  double escape_duration_s_{0.0};                               // pre-sampled turn duration
   std::chrono::steady_clock::time_point escape_cooldown_until_{};
 
   std::mt19937 rng_;
