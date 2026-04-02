@@ -30,7 +30,7 @@ constexpr double ESCAPE_COOLDOWN_S = 3.0;
 constexpr double ESCAPE_TOLERANCE_RAD = 0.5235987755982988;    // 30 deg
 
 // 0.22m — slightly above robot radius to account for physical sensor noise/latency
-constexpr double LASER_HALT_DISTANCE_M = 0.22;
+constexpr double LASER_HALT_DISTANCE_M = 0.35;
 constexpr double LASER_HALT_SECTOR_RAD = 0.7853981633974483;   // 45 deg
 
 struct FrontDistances
